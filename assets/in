@@ -1,0 +1,26 @@
+#!/bin/bash
+# vim: set ft=sh
+
+set -e
+
+payload=$TMPDIR/git-commits-resource-request
+
+cat > $payload <&0
+
+jq \
+  '. * {
+    source: {
+      branch: .version.branch
+    }
+  } + {
+    version: {
+      ref: .version.ref
+    }
+  }' < $payload |
+  ${GIT_RESOURCE_IN:-/opt/git-resource/in} "$@" |
+  jq --slurpfile payload $payload \
+    '. + {version: ($payload | .[0].version)}'
+
+cd "$@"
+mkdir -p .git/git-commits-resource
+jq < $payload -r .version.branch > .git/git-commits-resource/branch

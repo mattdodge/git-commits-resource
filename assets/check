@@ -1,0 +1,57 @@
+#!/bin/bash
+# vim: set ft=sh
+
+set -e
+
+exec 3>&1 # make stdout available as fd 3 for the result
+exec 1>&2 # redirect all output to stderr for logging
+
+source $(dirname $0)/common.sh
+
+payload=$TMPDIR/git-commits-resource-request
+repo=$TMPDIR/repo
+
+cat > $payload <&0
+
+load_pubkey $payload
+configure_git_ssl_verification $payload
+configure_credentials $payload
+
+uri=$(jq -r '.source.uri // ""' < $payload)
+exclude_branches=$(jq -r '.source.exclude // ""' < $payload)
+branch_filter=$(jq -r '.source.branches // [] | join(" ")' < $payload)
+git_config_payload=$(jq -r '.source.git_config // []' < $payload)
+
+previous_ts="$(jq -r '.version.ts // ""' < $payload)"
+
+configure_git_global "${git_config_payload}"
+
+e_point=!
+current_heads=$(git ls-remote -h "$uri" $branch_filter | sed 's/refs\/heads\///' | awk '{print $2, $1}' | awk "\$1 $e_point~ \"^($exclude_branches)$\"" | sort -V)
+
+# Clone a shallow copy of the remote repo to a tmpdir
+[ -d "$repo" ] || git clone --depth 1 --no-single-branch -n "$uri" "$repo"
+cd "$repo"
+git fetch
+
+all_heads=$(echo "$current_heads" |
+  while read branch ref; do
+    if [ -z "$branch" ]; then
+      continue
+    fi
+
+    ts=$(git show -s --format="%ct" $ref)
+    # If we have an incoming version only include newer branches/versions
+    if [[ -z "$previous_ts" ]] || [[ $ts -ge $previous_ts ]]; then
+      echo "$ts" "$branch" "$ref"
+    fi
+
+  done | sort -n)
+
+if [[ -z "$previous_ts" ]]; then
+  all_heads=$(echo "$all_heads" | tail -n 1)
+fi
+
+jq -n '$heads | rtrimstr("\n") | split("\n") |
+  map(split(" ") | {branch: .[1], ts: .[0], ref: .[2]})' \
+  --arg heads "$all_heads" >&3
